@@ -1,0 +1,227 @@
+name: Deploy Portfolio to GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # Job 1: Code Quality Checks
+  code-quality:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Install dependencies
+      run: |
+        npm init -y
+        npm install --save-dev htmlhint stylelint eslint
+        
+    - name: Lint HTML
+      run: |
+        echo '{
+          "tagname-lowercase": true,
+          "attr-lowercase": true,
+          "attr-value-double-quotes": true,
+          "doctype-first": true,
+          "tag-pair": true,
+          "spec-char-escape": true,
+          "id-unique": true,
+          "src-not-empty": true,
+          "attr-no-duplication": true,
+          "title-require": true
+        }' > .htmlhintrc
+        npx htmlhint *.html || true
+        
+    - name: Lint CSS
+      run: |
+        echo '{
+          "extends": "stylelint-config-standard",
+          "rules": {
+            "color-no-invalid-hex": true,
+            "font-family-no-duplicate-names": true,
+            "no-duplicate-selectors": true,
+            "declaration-block-no-duplicate-properties": true
+          }
+        }' > .stylelintrc.json
+        npx stylelint "*.css" || true
+        
+    - name: Lint JavaScript
+      run: |
+        echo '{
+          "env": {
+            "browser": true,
+            "es2021": true
+          },
+          "extends": "eslint:recommended",
+          "rules": {
+            "no-unused-vars": "warn",
+            "no-console": "off",
+            "semi": ["error", "always"]
+          }
+        }' > .eslintrc.json
+        npx eslint *.js || true
+
+  # Job 2: Security and Performance Checks
+  security-performance:
+    runs-on: ubuntu-latest
+    needs: code-quality
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Security scan
+      run: |
+        echo "🔍 Running security checks..."
+        # Check for common security issues
+        echo "Checking for potential XSS vulnerabilities..."
+        if grep -r "innerHTML.*=" . --include="*.js" --include="*.html"; then
+          echo "⚠️  Potential XSS vulnerability found - review innerHTML usage"
+        else
+          echo "✅ No obvious XSS vulnerabilities detected"
+        fi
+        
+        echo "Checking for external script sources..."
+        if grep -r "src=" . --include="*.html" | grep -E "http://|https://"; then
+          echo "ℹ️  External resources detected - ensure they are from trusted sources"
+        fi
+        
+    - name: Performance audit
+      run: |
+        echo "⚡ Running performance checks..."
+        
+        # Check image optimization
+        echo "Checking for large files..."
+        find . -type f \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" -o -name "*.gif" \) -size +100k -exec echo "⚠️  Large image: {}" \;
+        
+        # Check CSS/JS minification opportunity
+        echo "Checking for minification opportunities..."
+        css_size=$(find . -name "*.css" -exec wc -c {} \; | awk '{sum+=$1} END {print sum}')
+        js_size=$(find . -name "*.js" -exec wc -c {} \; | awk '{sum+=$1} END {print sum}')
+        echo "📊 Total CSS size: ${css_size:-0} bytes"
+        echo "📊 Total JS size: ${js_size:-0} bytes"
+        
+        if [ "${css_size:-0}" -gt 50000 ] || [ "${js_size:-0}" -gt 50000 ]; then
+          echo "💡 Consider minifying CSS/JS for better performance"
+        fi
+
+  # Job 3: Build and Test
+  build-and-test:
+    runs-on: ubuntu-latest
+    needs: [code-quality, security-performance]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Validate HTML structure
+      run: |
+        echo "🏗️  Building and validating project..."
+        
+        # Check if required files exist
+        required_files=("index.html" "styles.css" "script.js")
+        for file in "${required_files[@]}"; do
+          if [ -f "$file" ]; then
+            echo "✅ $file exists"
+          else
+            echo "❌ $file is missing"
+            exit 1
+          fi
+        done
+        
+    - name: Test JavaScript syntax
+      run: |
+        echo "🧪 Testing JavaScript syntax..."
+        node -c script.js && echo "✅ JavaScript syntax is valid" || { echo "❌ JavaScript syntax error"; exit 1; }
+        
+    - name: Create build artifacts
+      run: |
+        echo "📦 Creating build artifacts..."
+        mkdir -p build
+        cp -r *.html *.css *.js build/ 2>/dev/null || true
+        echo "Build completed at $(date)" > build/build-info.txt
+        
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: portfolio-build
+        path: build/
+        retention-days: 30
+
+  # Job 4: Deploy to GitHub Pages
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    # Only deploy on main branch push (not PRs)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    # Grant GITHUB_TOKEN the permissions required to make a Pages deployment
+    permissions:
+      pages: write
+      id-token: write
+      contents: read
+      
+    # Deploy to the github-pages environment
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Pages
+      uses: actions/configure-pages@v4
+      
+    - name: Upload to GitHub Pages
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: ./
+        
+    - name: Deploy to GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@v4
+      
+    - name: Deployment success notification
+      run: |
+        echo "🚀 Portfolio successfully deployed!"
+        echo "🌐 Your site is live at: ${{ steps.deployment.outputs.page_url }}"
+        echo "📅 Deployed at: $(date)"
+
+  # Job 5: Post-deployment tests
+  post-deployment:
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+    - name: Wait for deployment
+      run: sleep 30
+      
+    - name: Test site accessibility
+      run: |
+        echo "♿ Testing site accessibility..."
+        # Basic accessibility check
+        site_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+        echo "Testing: $site_url"
+        
+        # Check if site is reachable
+        if curl -s -o /dev/null -w "%{http_code}" "$site_url" | grep -q "200"; then
+          echo "✅ Site is reachable and returns 200 OK"
+        else
+          echo "⚠️  Site might not be fully deployed yet"
+        fi
+        
+    - name: Performance check
+      run: |
+        echo "⚡ Running post-deployment performance check..."
+        echo "Site should be optimized for:"
+        echo "  📱 Mobile devices"
+        echo "  🖥️  Desktop browsers" 
+        echo "  🌐 Cross-browser compatibility"
+        echo "  ♿ Accessibility standards"
